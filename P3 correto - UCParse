@@ -1,0 +1,464 @@
+class UCParser(Parser):
+    """A parser for the uC language."""
+
+    # Get the token list from the lexer (required)
+    tokens = UCLexer.tokens
+
+    precedence = (
+        # <<< YOUR CODE HERE >>>
+        ('left', 'ELSE'), 
+        ('left', 'FOR'),
+        ('left', 'WHILE'),  
+        ('left', 'BREAK'),
+        ('left', 'READ', 'PRINT'),
+        ('left', 'RPAREN', 'LPAREN', 'LBRACKET', 'RBRACKET'),
+        ('left', 'LBRACE'),
+        ('left', 'RBRACE'),
+        ('right', 'NOT'),
+        ('left', 'AND', 'OR'),
+        ('left', 'EQ', 'NE'),
+        ('nonassoc', 'LE', 'LT', 'GE', 'GT'),
+        ('left', 'PLUS', 'MINUS'),
+        ('left', 'DIVIDE','TIMES', 'MOD'),
+        ('right', 'EQUALS')
+    )
+    
+    def __init__(self, error_func=lambda msg, x, y: print("Lexical error: %s at %d:%d" % (msg, x, y), file=sys.stdout)):
+        """Create a new Parser.
+        An error function for the lexer.
+        """
+        self.lexer = UCLexer(error_func)
+
+    def parse(self, text, lineno=1, index=0):
+        return super().parse(self.lexer.tokenize(text, lineno, index))
+
+    # Internal auxiliary methods
+    def _token_coord(self, p):
+        line, column = self.lexer._make_location(p)
+        return Coord(line, column)
+
+    def _build_declarations(self, spec, decls):
+        """ Builds a list of declarations all sharing the given specifiers.
+        """
+        declarations = []
+
+        for decl in decls:
+            assert decl['decl'] is not None
+            declaration = Decl(
+                    name=None,
+                    type=decl['decl'],
+                    init=decl.get('init'),
+                    coord=decl['decl'].coord)
+
+            fixed_decl = self._fix_decl_name_type(declaration, spec)
+            declarations.append(fixed_decl)
+
+        return declarations
+
+    def _fix_decl_name_type(self, decl, typename):
+        """ Fixes a declaration. Modifies decl.
+        """
+        # Reach the underlying basic type
+        type = decl
+        while not isinstance(type, VarDecl):
+            type = type.type
+
+        decl.name = type.declname
+        if not typename:
+            # Functions default to returning int
+            if not isinstance(decl.type, FuncDecl):
+                self._parse_error("Missing type in declaration", decl.coord)
+            type.type = Type('int', coord=decl.coord)
+        else:
+            type.type = Type(typename.name, coord=typename.coord)
+            
+        return decl
+        
+    def _type_modify_decl(self, decl, modifier):
+        """Tacks a type modifier on a declarator, and returns
+           the modified declarator.
+           Note: the declarator and modifier may be modified
+        """
+        modifier_head = modifier
+        modifier_tail = modifier
+
+        # The modifier may be a nested list. Reach its tail.
+        while modifier_tail.type:
+            modifier_tail = modifier_tail.type
+
+        # If the decl is a basic type, just tack the modifier onto it
+        if isinstance(decl, VarDecl):
+            modifier_tail.type = decl
+            return modifier
+        else:
+            # Otherwise, the decl is a list of modifiers. Reach
+            # its tail and splice the modifier onto the tail,
+            # pointing to the underlying basic type.
+            decl_tail = decl
+
+            while not isinstance(decl_tail.type, VarDecl):
+                decl_tail = decl_tail.type
+
+            modifier_tail.type = decl_tail.type
+            decl_tail.type = modifier_head
+            return decl
+
+    # Error handling rule
+    def error(self, p):
+        if p:
+            if hasattr(p, 'lineno'):
+                print("Error at line %d near the symbol %s " % (p.lineno, p.value))
+            else:
+                print("Error near the symbol %s" % p.value)
+        else:
+            print("Error at the end of input")
+
+    # <program> ::= {<global_declaration>}+
+    @_('global_declaration_list')
+    def program(self, p):
+        return Program(p.global_declaration_list)
+        
+    @_('global_declaration { global_declaration }')
+    def global_declaration_list(self, p):
+        return [p.global_declaration0] + p.global_declaration1        
+
+    # <global_declaration> ::= <function_definition>
+    #                        | <declaration>
+    @_('function_definition',
+       'declaration')
+    def global_declaration(self, p):
+        if hasattr(p, 'function_definition'):
+            return p.function_definition
+        else:
+            return GlobalDecl(p.declaration)
+
+    # <function_definition> ::= <type_specifier> <declarator> {<declaration>}* <compound_statement>
+    # <<< YOUR CODE HERE >>>
+    @_('type_specifier declarator { declaration } compound_statement' )
+    def function_definition(self, p):
+        return (FuncDef(p.type_specifier, self._build_declarations(spec=p.type_specifier, decls=[dict(decl= p.declarator, init=None)])[0], p.declaration, p.compound_statement))  
+    # <type_specifier> ::= "void"
+    #                    | "char"
+    #                    | "int"
+    # <<< YOUR CODE HERE >>>
+    @_('VOID')
+    def type_specifier(self, p):
+        return (Type('void', coord=self._token_coord(p)))
+
+    @_('CHAR')
+    def type_specifier(self, p):
+       return (Type('char', coord=self._token_coord(p))) 
+
+    @_('INT')
+    def type_specifier(self, p):
+        return (Type('int', coord=self._token_coord(p)))    
+
+    # <declarator> ::= <identifier>
+    #                | "(" <declarator> ")"
+    #                | <declarator> "[" {<constant_expression>}? "]"
+    #                | <declarator> "(" {<parameter_list>}? ")"
+    # <<< YOUR CODE HERE >>>
+    @_('ID')
+    def declarator(self, p):
+        return (VarDecl(ID(str(p.ID), coord= self._token_coord(p))))  #faltou testar. Não temos 100% de certeza aqui
+
+    @_('LPAREN declarator RPAREN')
+    def declarator(self, p):
+        return (p.declarator) 
+
+    @_('declarator LBRACKET [ constant_expression ] RBRACKET')
+    def declarator(self, p):
+        return (self._type_modify_decl(decl=p.declarator, modifier=ArrayDecl(None, p.constant_expression, coord=p.declarator.coord)))    
+
+    @_('declarator LPAREN [ parameter_list ] RPAREN')
+    def declarator(self, p):
+        return (self._type_modify_decl(decl=p.declarator, modifier=FuncDecl(p.parameter_list, None, coord=p.declarator.coord)))  
+
+   
+    # <constant_expression> ::= <binary_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('binary_expression')
+    def constant_expression(self, p):
+        return (p.binary_expression)
+
+    # <binary_expression> ::= <unary_expression>
+    #                       | <binary_expression>  "*"   <binary_expression>
+    #                       | <binary_expression>  "/"   <binary_expression>
+    #                       | <binary_expression>  "%"   <binary_expression>
+    #                       | <binary_expression>  "+"   <binary_expression>
+    #                       | <binary_expression>  "-"   <binary_expression>
+    #                       | <binary_expression>  "<"   <binary_expression>
+    #                       | <binary_expression>  "<="  <binary_expression>
+    #                       | <binary_expression>  ">"   <binary_expression>
+    #                       | <binary_expression>  ">="  <binary_expression>
+    #                       | <binary_expression>  "=="  <binary_expression>
+    #                       | <binary_expression>  "!="  <binary_expression>
+    #                       | <binary_expression>  "&&"  <binary_expression>
+    #                       | <binary_expression>  "||"  <binary_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('unary_expression')
+    def binary_expression(self, p):
+        return (p.unary_expression)
+
+    @_('binary_expression TIMES binary_expression', 
+       'binary_expression DIVIDE binary_expression', 
+       'binary_expression MOD binary_expression',
+       'binary_expression PLUS binary_expression',
+       'binary_expression MINUS binary_expression', 
+       'binary_expression LT binary_expression',
+       'binary_expression LE binary_expression',
+       'binary_expression GT binary_expression',
+       'binary_expression GE binary_expression',
+       'binary_expression EQ binary_expression',
+       'binary_expression NE binary_expression',
+       'binary_expression AND binary_expression',
+       'binary_expression OR binary_expression')
+    def binary_expression(self, p):
+        return (BinaryOp(p[1], p.binary_expression0, p.binary_expression1, coord=p.binary_expression0.coord))   #testar isso aqui tambem
+
+    # <unary_expression> ::= <postfix_expression>
+    #                      | <unary_operator> <unary_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('postfix_expression')
+    def unary_expression(self, p):
+        return (p.postfix_expression)
+
+    @_('unary_operator unary_expression')
+    def unary_expression(self, p):
+        return (UnaryOp(p.unary_operator, p.unary_expression, coord= p.unary_expression.coord))   
+
+    # <postfix_expression> ::= <primary_expression>
+    #                        | <postfix_expression> "[" <expression> "]"
+    #                        | <postfix_expression> "(" {<argument_expression>}? ")"
+    # <<< YOUR CODE HERE >>>
+    @_('primary_expression')
+    def postfix_expression(self, p):
+        return (p.primary_expression)
+
+    @_('postfix_expression LBRACKET expression RBRACKET')
+    def postfix_expression(self, p):
+        return (ArrayRef(p.postfix_expression, p.expression, coord= p.postfix_expression.coord))   
+
+    @_('postfix_expression LPAREN [ argument_expression ] RPAREN ')
+    def postfix_expression(self, p):
+        return (FuncCall(p.postfix_expression, p.argument_expression, coord=p.postfix_expression.coord))  
+
+    # <primary_expression> ::= <identifier>
+    #                        | <constant>
+    #                        | <string>
+    #                        | "(" <expression> ")"
+    # <<< YOUR CODE HERE >>>
+    @_('ID')
+    def primary_expression(self, p):
+        return (ID(str(p.ID), coord=self._token_coord(p))) #conferir depois
+    
+    @_('constant')
+    def primary_expression(self, p):
+        return (p.constant)   
+    
+    @_('STRING_LITERAL')
+    def primary_expression(self, p):
+        return (Constant('string', str(p.STRING_LITERAL), coord=self._token_coord(p)))  
+
+    @_('LPAREN expression RPAREN')
+    def primary_expression(self, p):
+        return (p.expression)
+
+    # <constant> ::= <integer_constant>
+    #              | <character_constant>
+    # <<< YOUR CODE HERE >>>
+    @_('INT_CONST')
+    def constant(self, p):
+        return (Constant('int', str(p.INT_CONST), coord=self._token_coord(p)))
+   
+    @_('CHAR_CONST')
+    def constant(self, p):
+        return (Constant('char', str(p.CHAR_CONST), coord=self._token_coord(p)))    
+
+    # <expression> ::= <assignment_expression>
+    #                | <expression> "," <assignment_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('assignment_expression')
+    def expression(self, p):
+        return ( p.assignment_expression)
+    @_('assignment_expression COMMA assignment_expression { COMMA assignment_expression }')
+    def expression(self, p):
+        return ExprList([p.assignment_expression0] + [p.assignment_expression1] + p.assignment_expression2, coord=p.assignment_expression0.coord)
+    # <argument_expression> ::= <assignment_expression>
+    #                         | <argument_expression> "," <assignment_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('assignment_expression')
+    def argument_expression(self, p):
+        return ( p.assignment_expression)
+    @_('assignment_expression COMMA assignment_expression { COMMA assignment_expression }')
+    def argument_expression(self, p):
+        return ExprList([p.assignment_expression0] + [p.assignment_expression1] + p.assignment_expression2, coord=p.assignment_expression0.coord)
+
+    # <assignment_expression> ::= <binary_expression>
+    #                           | <unary_expression> "=" <assignment_expression>
+    # <<< YOUR CODE HERE >>>
+    @_('binary_expression')
+    def assignment_expression(self, p):
+        return (p.binary_expression)
+
+    @_('unary_expression EQUALS assignment_expression')
+    def assignment_expression(self, p):
+        return (Assignment(p.unary_expression, p.assignment_expression, coord=p.unary_expression.coord))
+
+    # <unary_operator> ::= "+"
+    #                    | "-"
+    #                    | "!"
+    # <<< YOUR CODE HERE >>>
+    @_('PLUS')
+    def unary_operator(self, p):
+        return ('+') 
+
+    @_('MINUS')
+    def unary_operator(self, p):
+        return ('-')     
+
+    @_('NOT')
+    def unary_operator(self, p):
+        return ('!') 
+    # <parameter_list> ::= <parameter_declaration>
+    #                    | <parameter_list> "," <parameter_declaration>
+    # <<< YOUR CODE HERE >>>
+   # @_('')   #checar
+   # def parameter_list(self, p):
+   #     return (p.parameter_list)
+
+    @_('parameter_declaration { COMMA parameter_declaration }')
+    def parameter_list(self, p):
+        return (ParamList([p.parameter_declaration0] + p.parameter_declaration1 , coord=p.parameter_declaration0.coord)
+)   
+
+    # <parameter_declaration> ::= <type_specifier> <declarator>
+    # <<< YOUR CODE HERE >>>
+    @_('type_specifier declarator')
+    def parameter_declaration(self, p):
+        return (self._build_declarations(spec=p.type_specifier, decls=[dict(decl=p.declarator, init=None)])[0])
+
+    # <declaration> ::=  <type_specifier> {<init_declarator_list>}? ";"
+    # <<< YOUR CODE HERE >>>
+    @_('type_specifier [ init_declarator_list ] SEMI')
+    def declaration(self, p):
+        return (self._build_declarations(spec=p.type_specifier, decls=p.init_declarator_list))
+
+    # <init_declarator_list> ::= <init_declarator>
+    #                          | <init_declarator_list> "," <init_declarator>
+    # <<< YOUR CODE HERE >>>
+    #@_('init_declarator_list')                 #eu comentei pra testar
+    #def init_declarator_list(self, p):
+    #    return (list(p.init_declarator))
+
+    @_('init_declarator { COMMA init_declarator }')
+    def init_declarator_list(self, p):
+        return ([ p.init_declarator0 ]+ p.init_declarator1)  
+
+    # <init_declarator> ::= <declarator>
+    #                     | <declarator> "=" <initializer>
+    # <<< YOUR CODE HERE >>>
+   
+    @_('declarator [ EQUALS initializer ]')
+    def init_declarator(self, p):
+        return (dict(decl=p.declarator, init=p.initializer))
+
+    # <initializer> ::= <assignment_expression>
+    #                 | "{" {<initializer_list>}? "}"
+    #                 | "{" <initializer_list> , "}"
+    # <<< YOUR CODE HERE >>>
+    @_('assignment_expression')
+    def initializer(self, p):
+        return (p.assignment_expression)
+    @_('LBRACE [ initializer_list ] RBRACE')
+    def initializer(self, p):
+        return (p.initializer_list)   
+    @_('LBRACE initializer_list "," RBRACE')
+    def initializer(self, p):
+        return (p.initializer_list)     
+
+    # <initializer_list> ::= <initializer>
+    #                      | <initializer_list> "," <initializer>
+    # <<< YOUR CODE HERE >>>
+   # @_('initializer_list')
+    #def initializer_list(self, p):
+     #   return (p.initializer_list) 
+
+    @_('initializer {  COMMA initializer }')        #eu comentei
+    def initializer_list(self, p):
+        return InitList([ p.initializer0 ] + p.initializer1, coord = p.initializer0.coord)    
+#InitList(list(initializer), coord=initializer.coord
+    # <compound_statement> ::= "{" {<declaration>}* {<statement>}* "}"
+    # <<< YOUR CODE HERE >>>
+    @_('LBRACE { declaration } { statement } RBRACE')
+    def compound_statement(self, p):
+        return (Compound((dcflat for sublist in p.declaration for dcflat in sublist), p.statement, self._token_coord(p))) 
+    # <statement> ::= <expression_statement>
+    #               | <compound_statement>
+    #               | <selection_statement>
+    #               | <iteration_statement>
+    #               | <jump_statement>
+    #               | <assert_statement>
+    #               | <print_statement>
+    #               | <read_statement>
+    # <<< YOUR CODE HERE >>>
+    @_('expression_statement', 'compound_statement', 'selection_statement', 'iteration_statement', 'jump_statement', 'assert_statement', 'print_statement', 'read_statement')
+    def statement(self, p):
+        return (p[0]) 
+    # <expression_statement> ::= {<expression>}? ";"
+    # <<< YOUR CODE HERE >>>
+    @_('[ expression ] SEMI')
+    def expression_statement(self, p):
+        return (p.expression if p.expression is not None else EmptyStatement(coord=self._token_coord(p))) 
+
+    # <selection_statement> ::= "if" "(" <expression> ")" <statement>
+    #                         | "if" "(" <expression> ")" <statement> "else" <statement>
+    # <<< YOUR CODE HERE >>>
+    @_('IF LPAREN expression RPAREN statement [ ELSE statement ]')
+    def selection_statement(self, p):
+        return (If(p.expression, p.statement0, p.statement1, coord=self._token_coord(p))) 
+
+    # <iteration_statement> ::= "while" "(" <expression> ")" <statement>
+    #                         | "for" "(" {<expression>}? ";" {<expression>}? ";" {<expression>}? ")" <statement>
+    #                         | "for" "(" <declaration> {<expression>}? ";" {<expression>}? ")" <statement>
+    # <<< YOUR CODE HERE >>>
+    @_('WHILE LPAREN expression RPAREN statement')
+    def iteration_statement(self, p):
+        return (While(p.expression, p.statement, coord=self._token_coord(p)))
+
+    @_('FOR LPAREN [ expression ] SEMI [ expression ] SEMI [ expression ] RPAREN statement')
+    def iteration_statement(self, p):
+        return (For(p.expression0, p.expression1, p.expression2, p.statement, coord=self._token_coord(p)))
+
+    @_('FOR LPAREN declaration [ expression ] SEMI [ expression ] RPAREN statement')
+    def iteration_statement(self, p):
+        return (For(DeclList(p.declaration, coord=self._token_coord(p)), p.expression0, p.expression1, p.statement, coord=self._token_coord(p)))    
+
+    # <jump_statement> ::= "break" ";"
+    #                    | "return" {<expression>}? ";"
+    # <<< YOUR CODE HERE >>>
+    @_('BREAK SEMI')
+    def jump_statement(self, p):
+        return (Break(coord=self._token_coord(p)))
+
+    @_('RETURN [ expression ] SEMI')
+    def jump_statement(self, p):
+        return (Return(p.expression, coord=self._token_coord(p)))
+
+    # <assert_statement> ::= "assert" <expression> ";"
+    # <<< YOUR CODE HERE >>>
+    @_('ASSERT expression SEMI')
+    def assert_statement(self, p):
+        return (Assert(p.expression, coord=self._token_coord(p)))
+
+    # <print_statement> ::= "print" "(" {<expression>}? ")" ";"
+    # <<< YOUR CODE HERE >>>
+    @_('PRINT LPAREN [ expression ] RPAREN SEMI')
+    def print_statement(self, p):
+        return (Print(p.expression, coord=self._token_coord(p)))
+
+    # <read_statement> ::= "read" "(" <argument_expression> ")" ";"
+    # <<< YOUR CODE HERE >>>
+    @_('READ LPAREN argument_expression RPAREN SEMI')
+    def read_statement(self, p):
+        return (Read(p.argument_expression, coord=self._token_coord(p)))
